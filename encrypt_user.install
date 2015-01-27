@@ -1,0 +1,123 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the encrypt_user module.
+ */
+
+/**
+ * Implements hook_install().
+ *
+ * Create the encrypt_user variables and the encrypt_user table email encryption is actived by
+ * default. Encrypt all exisiting email adresses of the user table.
+ */
+function encrypt_user_install() {
+  // Call encrypt_user module on an ultimate stage to improve compatibility with custom
+  // modules : encrypt_user decrypt functions will be call early thanks to the
+  // encrypt_user_module_implements_alter() function. Email address will be availables
+  // for custom modules. It allows to fix custom modules to.
+  db_update('system')
+    ->fields(array(
+    'weight' => 10,
+  ))
+    ->condition('name', 'encrypt_user')
+    ->condition('type', 'module')
+    ->execute();
+
+  variable_set('encrypt_user_loggin_email', (encrypt_user_mail_login_fix()) ? 1 : 0);
+  variable_set('encrypt_user_custom_search', 0);
+
+  // Change the description on the {users} table fields.
+  $schema = drupal_get_schema('users');
+  $encrypt_user_fields = array('mail', 'init');
+  foreach ($encrypt_user_fields as $encrypt_user_field) {
+    db_change_field('users', $encrypt_user_field, $encrypt_user_field, $schema['fields'][$encrypt_user_field]);
+  }
+
+  // Create 2 new fields into the {users} table.
+  $schema['users'] = array();
+  encrypt_user_schema_alter($schema);
+  foreach ($schema['users']['fields'] as $field => $spec) {
+    if (in_array($field, array('encrypt_user_mail', 'encrypt_user_init'))) {
+      if (db_field_exists('users', $field)) {
+        watchdog('system', 'Module install: Attempt to recreate field: "@field", when it already exists.', array('@field' => $field), WATCHDOG_WARNING);
+      }
+      else {
+        db_add_field('users', $field, $spec);
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_uninstall().
+ *
+ * Decrypt all exisiting email adresses of the user table. delete the encrypt_user
+ * variables, delete encrypt_user fields.
+ */
+function encrypt_user_uninstall() {
+  variable_del('encrypt_user_loggin_email');
+  variable_del('encrypt_user_custom_search');
+
+  // Change the description on the {users} table fields.
+  // Note : drupal_get_schema('users', TRUE) fails, use the user core module.
+  module_load_include('install', 'user');
+  $users_schema = user_schema();
+  $encrypt_user_fields = array('mail', 'init');
+  foreach ($encrypt_user_fields as $encrypt_user_field) {
+    db_change_field('users', $encrypt_user_field, $encrypt_user_field, $users_schema['users']['fields'][$encrypt_user_field]);
+  }
+
+  // Delete encrypt_user fields.
+  $schema['users'] = array();
+  encrypt_user_schema_alter($schema);
+  foreach ($schema['users']['fields'] as $field => $specs) {
+    if (in_array($field, array('encrypt_user_mail', 'encrypt_user_init')) && db_field_exists('users', $field)) {
+      db_drop_field('users', $field);
+    }
+  }
+}
+
+/**
+ * Implements hook_schema_alter().
+ *
+ * Edit the mail and init field description precising they are encrypted, add
+ * 2 new fields storing lowercase encrypted mail and init values.
+ */
+function encrypt_user_schema_alter(&$schema) {
+  if (isset($schema['users'])) {
+    // Change the description on the {users} table fields.
+    $schema['users']['fields']['mail']['description'] = "User's encrypted e-mail address.";
+    $schema['users']['fields']['init']['description'] = 'Encrypted e-mail address used for initial account creation.';
+    // Create 2 new fields.
+    $schema['users']['fields']['encrypt_user_mail'] = array(
+      'type' => 'varchar',
+      'length' => 254,
+      'not null' => TRUE,
+      'default' => '',
+      'description' => "User's encrypted lowercase email address.",
+    );
+    $schema['users']['fields']['encrypt_user_init'] = array(
+      'type' => 'varchar',
+      'length' => 254,
+      'not null' => TRUE,
+      'default' => '',
+      'description' => "Encrypted lowercase e-mail address used for initial account creation.",
+    );
+  }
+}
+
+
+/**
+ * Implements hook_disable().
+ *
+ * Disable encryption of user email address when the module is disabled.
+ * Decrypt all existing user email addresses.
+ */
+function encrypt_user_disable() {
+  // Decrypt all existing email addresses.
+  encrypt_user_update_crypt_all('decrypt');
+
+  // Display messages.
+  drupal_set_message(t('DataBase Email Encryption module disabled. Encryption is disabled now.'));
+}
