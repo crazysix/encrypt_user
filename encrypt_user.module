@@ -1,0 +1,537 @@
+<?php
+
+/**
+ * @file
+ * Main functions for the encrypt_user module.
+ */
+
+/**
+ * Implements hook_permission().
+ */
+function encrypt_user_permission() {
+  return array(
+    'administer user encryption' => array(
+      'title' => t('Administer user encryption'),
+      'description' => t('Configure options for Encrypt User'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+// NOTES: check configure variable in .info vs this.
+function encrypt_user_menu() {
+  $items = array();
+  $items['admin/config/system/encrypt/encrypt_user'] = array(
+    'title' => 'DataBase Email Encryption settings',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('encrypt_user_admin_form'),
+    'access arguments' => array('administer user encryption'),
+    'type' => MENU_NORMAL_ITEM,
+    'file' => 'encrypt_user.admin.inc',
+  );
+  return $items;
+}
+
+/**
+ * Provide the stored database value of an email address.
+ *
+ * @param string $email
+ *   An uncrypted (or decrypted) email.
+ *
+ * @return string
+ *   A serialized array containing the encrypted text and encryption method.
+ */
+function encrypt_user_encrypt_email($email) {
+  if ( (!empty($email)) && valid_email_address($email)) {
+    // The email need to be encrypted.
+    $formated_mail = check_plain(trim($email));
+    // Always use lowercase email to avoid complexity.
+    $formated_mail = drupal_strtolower($formated_mail );
+    // It returns the encrypted value.
+    return encrypt($formated_mail, NULL, NULL, NULL, NULL);
+  }
+  else {
+    return $email;
+  }
+}
+
+/**
+ * Decrypts an email address if needed.
+ *
+ * Always returns the uncrypted provided value.
+ *
+ * @param $crypted_mail
+ *   A string, the encrypted email.
+ *
+ * @return
+ *   A string corresponding to the $email decrypted value or the $email value
+ *   if decryption is not needed.
+ */
+function encrypt_user_decrypt_email($crypted_mail) {
+  if (!empty($crypted_mail) && !valid_email_address($crypted_mail)) {
+    $uncrypted_mail = decrypt($crypted_mail);
+    // Check if the decrypted email address is valid before returning it :
+    if (valid_email_address($uncrypted_mail)) {
+      return $uncrypted_mail;
+    }
+    else {
+      // This was not a valid email address : decryption is cancelled.
+      return $crypted_mail;
+    }
+  }
+  else {
+    // This email address is empty or is already decrypted.
+    return $crypted_mail;
+  }
+}
+
+/**
+ * Encrypt a username.
+ *
+ * @param $username
+ *   A string, the current username.
+ *
+ * @return
+ *   A string, the encrypted username.
+ */
+function encrypt_user_encrypt_username($username) {
+  return encrypt($username, NULL, NULL, NULL, NULL);
+}
+
+/**
+ * Decrypt username.
+ *
+ * @param $encrypted_username
+ *   A string, the encrypted username.
+ *
+ * @return
+ *   A string, the decrypted username.
+ */
+function encrypt_user_decrypt_username($encrypted_username) {
+  return decrypt($encrypted_username);
+}
+
+/**
+ * Provide the encrypted mails values to store into the database.
+ *
+ * Provide the encrypted values for 4 fields of the {users} table (the 'mail',
+ * 'init', encrypt_user_mail', and 'encrypt_user_init' fields) from provided 'mail and 'init'
+ * values.
+ *
+ * @param $account
+ *   An user object, $account->mail and $account->init may be used.
+ * @param $edit
+ *   An array, if provided, $edit['mail'] or edit['init'] will overwrite
+ *   $account->mail and $account->init. It is used by the encrypt_user_user_presave()
+ *   function. Default is empty.
+ *
+ * @return
+ *   An array, keyed by 'mail', 'init', encrypt_user_mail', and 'encrypt_user_init'. Values are
+ *   the encrypted mails (lowercase for the encrypt_user_* ones).
+ */
+function encrypt_user_store($account, $edit = array()) {
+  if (!is_object($account) || !is_array($edit)) {
+    return array();
+  }
+  $encrypt_user_fields = array('mail', 'init');
+  $to_store = $edited_value = array();
+  $mail_edited_value = FALSE;
+  foreach ($encrypt_user_fields as $encrypt_user_field) {
+    // $edit value overwrites the $account value.
+    $edited_value = (!empty($edit[$encrypt_user_field])) ? $edit[$encrypt_user_field] : ((!empty($account->$encrypt_user_field)) ? $account->$encrypt_user_field : '');
+    // For performance raisons, does not decrypt the value twice.
+    $mail_init_equal = ($edited_value == $mail_edited_value);
+    $field_is_lc = ($edited_value == drupal_strtolower($edited_value));
+    // Here : store the encrypted values.
+    $to_store[$encrypt_user_field] = ($mail_edited_value === FALSE || !$mail_init_equal) ? encrypt_user_encrypt($edited_value, FALSE) : $to_store['mail'];
+    $to_store["encrypt_user_$encrypt_user_field"] = ($field_is_lc) ? $to_store[$encrypt_user_field] : encrypt_user_encrypt($edited_value, TRUE);
+    // Save the 'mail' value in order to compare it to the 'init' value.
+    $mail_edited_value = $edited_value;
+  }
+  return $to_store;
+}
+
+/**
+ * Fix the encrypted mail and init values on an user object.
+ *
+ * Decrypt 'mail' and 'init' variables from the user object and delete
+ * unnecessary 'encrypt_user_mail' and 'encrypt_user_init' variables. Note that the user object
+ * is passed by reference.
+ *
+ * @param $account
+ *   An user object, $account->mail and $account->init will be used.
+ *
+ */
+function encrypt_user_extract(&$account) {
+  if (isset($account->encrypt_user_mail) || empty($account->uid)) {
+    // Decrypt mail property.
+    $uncrypted_mail = encrypt_user_decrypt($account->mail);
+    // Decrypt init property.
+    $account->init = ($account->mail == $account->init) ? $uncrypted_mail : encrypt_user_decrypt($account->init);
+    $account->mail = $uncrypted_mail;
+    // Delete encrypted lowercase values.
+    if (isset($account->encrypt_user_mail, $account->encrypt_user_init)) {
+      unset($account->encrypt_user_mail, $account->encrypt_user_init);
+    }
+  }
+}
+
+/**
+ * Encrypts or decrypts all user email addresses.
+ *
+ * This function encrypts or decrypts all user email addresses from the user
+ * table. It is used when the encrypt_user module is installed, enabled or disabled, or
+ * when the AES encryption options are updated.
+ *
+ * @param $action
+ *   A string. Possible values are 'decrypt' and 'encrypt'. Default to
+ *   'encrypt'.
+ *
+ * @param $set_message
+ *   A boolean (optional). If true : it displays a message when the
+ *   encryption/decryption is completed. Defaults to TRUE.
+ */
+function encrypt_user_update_crypt_all($action = 'encrypt', $set_message = TRUE) {
+
+  if (!in_array($action, array('decrypt', 'encrypt'))) {
+    return FALSE;
+  }
+  $result = db_query('SELECT uid, mail, init, encrypt_user_mail, encrypt_user_init FROM {users} WHERE uid <> :uid', array(':uid' => 0));
+  $updated_users = $n_users = 0;
+  while ($account = $result->fetchObject()) {
+    // Initialisation.
+    $to_update = array();
+    $current = array(
+      'mail' => $account->mail,
+      'init' => $account->init,
+      'encrypt_user_mail' => $account->encrypt_user_mail,
+      'encrypt_user_init' => $account->encrypt_user_init,
+    );
+    $n_users++;
+    if ($action == 'decrypt') {
+      // Decrypt every email addresses.
+      $mail_uncrypted = encrypt_user_decrypt($account->mail);
+      $to_update = array(
+        'mail' => $mail_uncrypted,
+        'init' => (($account->init == $account->mail) ? $mail_uncrypted : encrypt_user_decrypt($account->init)),
+        'encrypt_user_mail' => '',
+        'encrypt_user_init' => '',
+      );
+    }
+    else { // Case $action == 'encrypt':
+      // Encrypt every email addresses.
+      $to_update = encrypt_user_store($account);
+    }
+
+    $compare = array_diff_assoc($current, $to_update);
+    if (!empty($compare)) {
+      // Processed to the update of the user table.
+      $updated_users++;
+      db_update('users')
+      ->fields($to_update)
+      ->condition('uid', $account->uid)
+      ->execute();
+    }
+  }
+
+  // Display message.
+  if ($set_message) {
+    drupal_set_message(t('All users email addresses have been %crypted (concerning @updated_users of @total_users users)',
+      array('@updated_users' => $updated_users, '@total_users' => $n_users, '%crypted' => (($action == 'encrypt') ? t('encrypted') : t('decrypted')))));
+  }
+  // Watchdog changes.
+  if ($updated_users > 0) {
+    watchdog('encrypt_user', 'All users email addresses have been %crypted (concerning @updated_users of @total_users users)',
+      array('%crypted' => (($action == 'encrypt') ? t('encrypted') : t('decrypted')), '@updated_users' => $updated_users, '@total_users' => $n_users), WATCHDOG_NOTICE);
+  }
+}
+
+/**
+ * Implements hook_user_load().
+ *
+ * Decrypted the mail and init addresses loading a user object.
+ */
+function encrypt_user_user_load($users) {
+
+  // Decrypt email address when a user is loaded, it makes the email address
+  // available for the system.
+  foreach ($users as $record) {
+    encrypt_user_extract($record);
+  }
+}
+
+/**
+ * Implements hook_user_presave().
+ *
+ * Encrypt the email address on saving a user account.
+ */
+function encrypt_user_user_presave(&$edit, $account, $category) {
+
+  $to_update = encrypt_user_store($account, $edit);
+  $edit = array_merge($edit, $to_update);
+}
+
+/**
+ * Implements hook_user_insert().
+ *
+ * Decrypt the email address on saving a new user account once the mails are
+ * saved into the {users} table.
+ */
+function encrypt_user_user_insert(&$edit, $account, $category) {
+  encrypt_user_user_update($edit, $account, $category);
+}
+
+/**
+ * Implements hook_user_update().
+ *
+ * Decrypt the email address on saving an existing user account once the mails
+ * are saved into the {users} table.
+ */
+function encrypt_user_user_update(&$edit, $account, $category) {
+
+  // Reset the mail and init values to the decrypted version : thanks to this
+  // lines, the user_save() core function will return the decrypted mail and
+  // init values.
+  encrypt_user_extract($account);
+  // Optional, reset the $edit values to the decrypted version :
+  $edit['mail'] = $account->mail;
+  $edit['init'] = $account->init;
+  unset($edit['encrypt_user_mail'], $edit['encrypt_user_init']);
+}
+
+/**
+ * Implements hook_user_view().
+ *
+ * This function display an explicit message on the user profile page,
+ * concerning the email encryption.
+ */
+function encrypt_user_user_view($account, $view_mode, $langcode) {
+  if (user_access('administer user encryption') && $view_mode == 'full') {
+    // Specific field, it explicits security about email address.
+    // Use static query to bypass encrypt_user_query_alter() function.
+    $stored_mail = db_query('SELECT mail FROM {users} WHERE uid = :uid', array(':uid' => $account->uid))->fetchField();
+
+    // Handle output message about email address encryption.
+    if ($stored_mail == '') {
+      $email_status = t('No email address registered for %name.', array('%name' => $account->name));
+    }
+    elseif (!valid_email_address($stored_mail)) {
+      $stored_mail_decrypted = encrypt_user_decrypt($stored_mail);
+      if ($stored_mail_decrypted != $stored_mail) {
+        $email_status = t("The %name's email address is encrypted.", array('%name' => $account->name));
+      }
+      else {
+        $email_status = t("The %name's email address is encrypted but corrupted. Sending email will be a failure.", array('%name' => $account->name));
+      }
+    }
+    else {
+      $email_status = t("The %name's email address is not encrypted.", array('%name' => $account->name));
+    }
+
+    // Display new field on the user profile page.
+    $account->content['crypted email']['#type'] = 'user_profile_category';
+    $account->content['crypted email']['#title'] = t('Security');
+    $account->content['crypted email']['#attributes']['class'] = 'user-member';
+    $account->content['crypted email']['email status'] = array(
+      '#type' => 'user_profile_item',
+      '#title' => t('Contact email'),
+      '#markup' => $email_status,
+    );
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ *
+ * Replace the email validation call back.
+ */
+function encrypt_user_form_user_profile_form_alter(&$form, &$form_state, $form_id) {
+  $to_replace = 'user_account_form_validate';
+  $replaced_by = 'encrypt_user_user_account_form_validate';
+  $key_to_replace = array_search($to_replace, $form['#validate']);
+  if ($key_to_replace !== FALSE) {
+    $form['#validate'][$key_to_replace] = $replaced_by;
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ *
+ * Replace the email validation call back.
+ */
+function encrypt_user_form_user_register_form_alter(&$form, &$form_state, $form_id) {
+  encrypt_user_form_user_profile_form_alter($form, $form_state, $form_id);
+}
+
+/**
+ * Form validation handler for user_account_form().
+ *
+ * This function replace the user_account_form_validate() core function.
+ *
+ * @see user_account_form()
+ */
+function encrypt_user_user_account_form_validate($form, &$form_state) {
+  if ($form['#user_category'] == 'account' || $form['#user_category'] == 'register') {
+    $account = $form['#user'];
+    // Validate new or changing username.
+    if (isset($form_state['values']['name'])) {
+      if ($error = user_validate_name($form_state['values']['name'])) {
+        form_set_error('name', $error);
+      }
+      elseif ((bool) db_select('users')->fields('users', array('uid'))->condition('uid', $account->uid, '<>')->condition('name', db_like($form_state['values']['name']), 'LIKE')->range(0, 1)->execute()->fetchField()) {
+        form_set_error('name', t('The name %name is already taken.', array('%name' => $form_state['values']['name'])));
+      }
+    }
+
+    // Trim whitespace from mail, to prevent confusing 'e-mail not valid'
+    // warnings often caused by cutting and pasting.
+    $mail = trim($form_state['values']['mail']);
+    form_set_value($form['account']['mail'], $mail, $form_state);
+
+    // Validate the e-mail address, and check if it is taken by an existing user.
+    if ($error = user_validate_mail($form_state['values']['mail'])) {
+      form_set_error('mail', $error);
+    }
+    // HERE: we edit the core function.
+    elseif ((bool) db_select('users')->fields('users', array('uid'))->condition('uid', $account->uid, '<>')->condition('encrypt_user_mail', encrypt_user_encrypt($form_state['values']['mail'], TRUE), '=')->range(0, 1)->execute()->fetchField()) {
+      // Format error message dependent on whether the user is logged in or not.
+      if ($GLOBALS['user']->uid) {
+        form_set_error('mail', t('The e-mail address %email is already taken.', array('%email' => $form_state['values']['mail'])));
+      }
+      else {
+        form_set_error('mail', t('The e-mail address %email is already registered. <a href="@password">Have you forgotten your password?</a>', array('%email' => $form_state['values']['mail'], '@password' => url('user/password'))));
+      }
+    }
+
+    // Make sure the signature isn't longer than the size of the database field.
+    // Signatures are disabled by default, so make sure it exists first.
+    if (isset($form_state['values']['signature'])) {
+      // Move text format for user signature into 'signature_format'.
+      $form_state['values']['signature_format'] = $form_state['values']['signature']['format'];
+      // Move text value for user signature into 'signature'.
+      $form_state['values']['signature'] = $form_state['values']['signature']['value'];
+
+      $user_schema = drupal_get_schema('users');
+      if (drupal_strlen($form_state['values']['signature']) > $user_schema['fields']['signature']['length']) {
+        form_set_error('signature', t('The signature is too long: it must be %max characters or less.', array('%max' => $user_schema['fields']['signature']['length'])));
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ *
+ * Monitoring changes in encryption to update datas from encrypt_user : encrypt_user data
+ * will be updated if the encryption method is changing.
+ */
+ // NOTES: consider using a hook on encrypt to update encrypted data if method is changed. This could be devestating to the data...
+
+/**
+ * Implements hook_boot().
+ *
+ * Make the email address available for the connected user (loaded during the
+ * bootstrap).
+ */
+function encrypt_user_boot() {
+  global $user;
+  if ($user && (!empty($user->mail) || !empty($user->init))) {
+    // Load the needed files.
+    drupal_load('module', 'encrypt');
+    drupal_load('module', 'encrypt_user');
+    // Load common.inc for the valid_email_address() core function.
+    $file = DRUPAL_ROOT . '/' . 'includes/common.inc';
+    if (is_file($file)) {
+      require_once $file;
+    }
+    // uncrypt datas for the connected user.
+    encrypt_user_extract($user);
+  }
+}
+
+/**
+ * Implements hook_mail_alter().
+ *
+ * Make the email address available for mass mailing feature. This functions is
+ * not needed for core feature but may improve compatibility with custom
+ * modules.
+ */
+function encrypt_user_mail_alter(&$message) {
+  // @TODO : add a parser for multiple email recipients.
+  $message['to'] = encrypt_user_decrypt_email($message['to']);
+}
+
+/**
+ * Implements hook_module_implements_alter().
+ *
+ * Change the hook order. The purpose is to improve the compatibility with
+ * custom modules : call the encrypt_user module on an early stage for decrypting and
+ * on a ultimate stage for encrypting.
+ */
+function encrypt_user_module_implements_alter(&$implementations, $hook) {
+
+  // In order to improve compatibility with custom modules, set the decryption
+  // on an early stage.
+  $hook_decrypt = array(
+    'user_load',
+    'user_insert',
+    'user_update',
+    'mail_alter',
+    'boot',
+    'entity_load',
+  );
+  if (in_array($hook, $hook_decrypt) && isset($implementations['encrypt_user'])) {
+    $group = $implementations['encrypt_user'];
+    unset($implementations['encrypt_user']);
+    $implementations = array_merge(array('encrypt_user' => $group), $implementations);
+  }
+
+  // In order to improve compatibility with custom modules, set the encryption
+  // on an ultimate stage.
+  $hook_encrypt = array(
+    'query_alter',
+    'query_user_load_multiple_alter',
+    'query_pager_alter',
+    'entity_query_alter',
+  );
+  if (in_array($hook, $hook_encrypt) && isset($implementations['encrypt_user'])) {
+    $group = $implementations['encrypt_user'];
+    unset($implementations['encrypt_user']);
+    $implementations['encrypt_user'] = $group;
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ *
+ * Allow to connect using own email instead of the username.
+ */
+function encrypt_user_form_user_login_alter(&$form, &$form_state, $form_id) {
+  // Extra option : allow to connect using own email.
+  // Set compatibility with the 'logintoboggan'' or the 'email_registration'
+  // custom modules.
+  if (encrypt_user_mail_login_fix()) {
+    if (encrypt_user_logintoboggan_fix() && isset($form['#validate'])) {
+      $to_replace = 'logintoboggan_user_login_validate';
+      $replaced_by = 'encrypt_user_user_login_validate';
+      $key_to_replace = array_search($to_replace, $form['#validate']);
+      if ($key_to_replace !== FALSE) {
+        $form['#validate'][$key_to_replace] = $replaced_by;
+      }
+    }
+    elseif (encrypt_user_email_registration_fix() && isset($form['name']['#element_validate'])) {
+      $to_replace = 'email_registration_user_login_validate';
+      $replaced_by = 'encrypt_user_user_login_validate';
+      $key_to_replace = array_search($to_replace, $form['name']['#element_validate']);
+      if ($key_to_replace !== FALSE) {
+        $form['name']['#element_validate'][$key_to_replace] = $replaced_by;
+      }
+    }
+  }
+  elseif (variable_get('encrypt_user_loggin_email', 0)) {
+    $form['name']['#title'] = t('username or mail:');
+    $form['name']['#element_validate'][] = 'encrypt_user_user_login_validate';
+  }
+}

@@ -1,0 +1,8 @@
+name = Encrypt User
+description = Encrypt the user email and username. This module alters the user table, but should not effect the user experience.
+dependencies[] = user
+dependencies[] = encrypt
+package = Encryption
+core = 7.x
+files[] = views/views_handler_field_encrypt_user_user_mail.inc
+configure = admin/config/system/encrypt/encrypt-user
